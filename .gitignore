@@ -1,0 +1,4 @@
+# 이 저장소(키트) 자체를 위한 것. 여러분의 프로젝트에는 gitignore.example 을 쓴다.
+.DS_Store
+__pycache__/
+*.pyc

@@ -1,0 +1,23 @@
+# 맛보기용 — 브로커와 시뮬레이터만 띄워서 메시지를 구경하는 최소 구성.
+# 내 프로젝트의 compose.yaml 은 키트 루트의 compose.template.yaml 에서 시작한다.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro   # 개발용(익명 허용)
+    networks: [internal]
+    restart: unless-stopped
+    # ports: ["1883:1883"]   # ← 호스트에 열지 않는 것이 기본. 제출본에서는 열지 않는다
+
+  sim:
+    build: .                     # 내 프로젝트에 넣을 땐 ./sensor-sim
+    volumes:
+      - ./sim.yaml:/config/sim.yaml:ro
+    environment:
+      STUDENT_ID: "202612345"    # ★ 본인 학번 (sim.yaml 보다 우선)
+    depends_on: [mosquitto]
+    networks: [internal]
+    restart: unless-stopped
+
+networks:
+  internal: {}

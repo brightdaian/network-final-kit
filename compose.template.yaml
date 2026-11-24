@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  제출본 compose.yaml 의 출발점.  내 저장소 루트에 compose.yaml 로 복사해서 쓴다.
+#
+#  지켜야 할 것 (CONTRACT.md 0절)
+#    - 서비스 이름 mosquitto · sim 은 고정 (채점기가 이 이름으로 찾는다)
+#    - 호스트에 공개하는 포트는 app 하나뿐
+#    - .env 가 없어도 `docker compose up -d --build` 한 번으로 떠야 한다
+#      → 비밀값은 ${VAR:-기본값} 형태로 기본값을 준다
+#  app · db 는 여러분의 설계다. 아래는 예시이니 자유롭게 바꾼다 (단 포트 규칙은 유지).
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    # CRLF 로 체크아웃돼도 죽지 않게 \r 을 떼고 실행한다 (Windows + .gitattributes 누락 대비)
+    entrypoint: ["sh", "-c", "tr -d '\\r' < /mosquitto/config/entrypoint.sh > /tmp/entry.sh && exec sh /tmp/entry.sh"]
+    environment:
+      SIM_PW:    "${SIM_PW:-sim-dev-pass}"
+      BRIDGE_PW: "${BRIDGE_PW:-bridge-dev-pass}"
+      GRADER_PW: "${GRADER_PW:-grader-pass}"                # grading.json 의 mqtt_grader 와 같게
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ./mosquitto/entrypoint.sh:/mosquitto/config/entrypoint.sh:ro
+    networks: [internal]                                   # 호스트 포트 없음
+    restart: unless-stopped
+
+  sim:
+    build: ./sensor-sim                                    # 키트의 sensor-sim 을 그대로 복사
+    volumes:
+      - ./sim.yaml:/config/sim.yaml:ro
+    environment:
+      STUDENT_ID: "202612345"                              # ★ 본인 학번
+      BROKER_USERNAME: sim
+      BROKER_PASSWORD: "${SIM_PW:-sim-dev-pass}"
+    depends_on: [mosquitto]
+    networks: [internal]
+    restart: unless-stopped
+
+  app:                                                     # ★ 여러분이 만드는 FastAPI 앱
+    build: ./app
+    ports: ["8000:8000"]                                   # 호스트에 여는 유일한 포트
+    environment:
+      STUDENT_ID: "202612345"
+      MQTT_USER: bridge
+      MQTT_PW:   "${BRIDGE_PW:-bridge-dev-pass}"
+      JWT_SECRET: "${JWT_SECRET:-}"                        # 비우면 앱이 무작위로 만든다
+      VIEWER_PW:  "${VIEWER_PW:-viewer-pass}"              # grading.json 의 accounts 와 같게
+      MANAGER_PW: "${MANAGER_PW:-manager-pass}"
+    volumes:
+      - appdata:/data
+    depends_on: [mosquitto]
+    networks: [internal]
+    restart: unless-stopped
+
+networks:
+  internal: {}
+volumes:
+  appdata: {}

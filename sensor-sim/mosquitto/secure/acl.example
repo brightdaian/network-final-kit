@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────
+#  ACL 예시 — 파일 이름을 acl 로 바꾸고 inu/s7a68 를 "본인 prefix" 로 고칠 것
+#  (prefix 는 시뮬레이터 실행 시 첫 줄에 출력됨)
+#  원칙: 최소 권한 — 계정마다 꼭 필요한 토픽 · 방향(read/write)만 허용
+# ─────────────────────────────────────────────────────────────
+
+# 시뮬레이터(기기들): 자기 데이터 · 상태 · ack 발행, 환기장치 명령 수신
+user sim
+topic write     inu/s7a68/+/+/+
+topic write     inu/s7a68/+/+/+/status
+topic write     inu/s7a68/+/vent/+/ack
+topic readwrite inu/s7a68/+/vent/+/cmd
+
+# 학생 브리지(백엔드): 전부 읽기, 명령만 쓰기
+user bridge
+topic read  inu/s7a68/#
+topic write inu/s7a68/+/vent/+/cmd
+
+# 채점기: 전부 읽기만 (CONTRACT.md 0절 — grading.json 의 mqtt_grader 계정)
+user grader
+topic read  inu/s7a68/#
+
+# 생각해 볼 것: 브라우저(대시보드)에 브로커 계정을 줘야 할까? (Week 7 Architecture View)

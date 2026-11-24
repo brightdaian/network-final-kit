@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""시뮬레이터 제어 CLI.  컨테이너 안에서 실행:  docker compose exec sim simctl <명령>
+
+  simctl list [--json]                     기기 목록 · 연결 상태 · 발행 수 · 적용 중인 고장
+  simctl stats                             기기별 발행 수 · 초당 발행률 (수신 측 손실률 계산용)
+  simctl modes                             고장 모드 설명
+  simctl fault <대상> <모드> [-d 초] [-p 값]  고장 주입 (기간 생략 시 clear 할 때까지)
+  simctl clear [대상] [모드]                고장 해제 (대상 생략 = all)
+  simctl cmd <vent기기> on|off [--id ID]    환기장치에 명령 발행 (브로커 경유) — 테스트용
+  simctl cmd <vent기기> --raw '<JSON>'       임의 payload 로 명령 (검증 테스트용)
+  simctl truth [--past 분] [--ahead 분]     (평가자용) 실제 이상 상황 구간 · 고장 주입 이력
+  simctl scenario <파일.yaml>               (평가자용) 시간표대로 고장을 차례로 주입
+
+  대상: 기기ID(co2-01) | type:co2 | room:r301 | all
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+BASE = f"http://127.0.0.1:{os.environ.get('SIM_CONTROL_PORT', '9090')}"
+KST = dt.timezone(dt.timedelta(hours=9))
+
+
+def call(method, path, body=None, exit_on_error=True):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        msg = json.loads(e.read()).get("error")
+        if not exit_on_error:
+            raise RuntimeError(msg)
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError:
+        print("시뮬레이터 제어 서버에 연결할 수 없습니다 (컨테이너 안에서 실행했는지 확인).", file=sys.stderr)
+        sys.exit(1)
+
+
+def hhmmss(ms):
+    return dt.datetime.fromtimestamp(ms / 1000, KST).strftime("%H:%M:%S")
+
+
+def run_scenario(path):
+    """YAML 형식:
+    - {at: 0,   target: co2-01, mode: silent, duration: 60}
+    - {at: 90,  target: type:env, mode: spike, duration: 30}
+    - {at: 150, target: all, mode: clear}
+    at = 시나리오 시작 후 초.  mode: clear 는 해제.
+    """
+    import yaml
+    with open(path, encoding="utf-8") as f:
+        steps = sorted(yaml.safe_load(f) or [], key=lambda s: s["at"])
+    t0 = time.time()
+    for s in steps:
+        time.sleep(max(0.0, t0 + float(s["at"]) - time.time()))
+        stamp = dt.datetime.now(KST).strftime("%H:%M:%S")
+        try:
+            if s["mode"] == "clear":
+                r = call("POST", "/clear", {"target": s.get("target", "all"), "mode": s.get("clear_mode")}, False)
+            else:
+                r = call("POST", "/fault", {"target": s["target"], "mode": s["mode"],
+                                            "duration": s.get("duration"), "param": s.get("param")}, False)
+            print(f"{stamp}  +{s['at']:>4}s  {s['mode']:10s} → {', '.join(r['devices'])}", flush=True)
+        except RuntimeError as e:
+            print(f"{stamp}  +{s['at']:>4}s  {s['mode']:10s} 실패: {e}", flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="simctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list").add_argument("--json", action="store_true")
+    sub.add_parser("stats").add_argument("--json", action="store_true")
+    sub.add_parser("modes")
+    f = sub.add_parser("fault")
+    f.add_argument("target")
+    f.add_argument("mode")
+    f.add_argument("-d", "--duration", type=float)
+    f.add_argument("-p", "--param", type=float)
+    c = sub.add_parser("clear")
+    c.add_argument("target", nargs="?", default="all")
+    c.add_argument("mode", nargs="?")
+    m = sub.add_parser("cmd")
+    m.add_argument("target")
+    m.add_argument("action", nargs="?", choices=["on", "off"])
+    m.add_argument("--id", dest="cmd_id")
+    m.add_argument("--raw")
+    t = sub.add_parser("truth")
+    t.add_argument("--past", type=float, default=30, help="지난 N분 (기본 30)")
+    t.add_argument("--ahead", type=float, default=0, help="앞으로 N분 (기본 0)")
+    t.add_argument("--json", action="store_true")
+    s = sub.add_parser("scenario")
+    s.add_argument("file")
+    a = ap.parse_args()
+
+    if a.cmd in ("list", "stats") and a.json:
+        print(json.dumps(call("GET", "/devices"), ensure_ascii=False))
+    elif a.cmd == "list":
+        for d in call("GET", "/devices"):
+            faults = ", ".join(f"{m}({'∞' if s is None else f'{s}s'})" for m, s in d["faults"].items()) or "-"
+            extra = f" state={d['state']}" if "state" in d else ""
+            print(f"{d['device_id']:13s} {d['room']:7s} {'on ' if d['connected'] else 'OFF'} "
+                  f"seq={d['seq']:<6d} sent={d['sent']:<6d}{extra} faults: {faults}")
+    elif a.cmd == "stats":
+        devs = call("GET", "/devices")
+        print(f"{'device':13s} {'topic':48s} {'sent':>7s} {'msg/s':>7s}")
+        for d in devs:
+            print(f"{d['device_id']:13s} {d['topic']:48s} {d['sent']:7d} {d['rate']:7.2f}")
+        print(f"{'합계':13s} {'':48s} {sum(d['sent'] for d in devs):7d} {sum(d['rate'] for d in devs):7.2f}")
+    elif a.cmd == "modes":
+        for m, desc in call("GET", "/modes").items():
+            print(f"{m:11s} {desc}")
+    elif a.cmd == "fault":
+        r = call("POST", "/fault", {"target": a.target, "mode": a.mode, "duration": a.duration, "param": a.param})
+        print("적용:", ", ".join(r["devices"]))
+    elif a.cmd == "clear":
+        r = call("POST", "/clear", {"target": a.target, "mode": a.mode})
+        print("해제:", ", ".join(r["devices"]))
+    elif a.cmd == "cmd":
+        if a.raw is None and a.action is None:
+            ap.error("cmd 에는 on|off 또는 --raw 가 필요합니다")
+        payload = a.raw if a.raw is not None else json.dumps(
+            {"cmd_id": a.cmd_id or uuid.uuid4().hex[:12], "action": a.action, "ts": int(time.time() * 1000)})
+        r = call("POST", "/cmd", {"target": a.target, "payload": payload})
+        print("발행:", ", ".join(r["devices"]), payload)
+    elif a.cmd == "truth":
+        r = call("GET", f"/truth?past={a.past}&ahead={a.ahead}")
+        if a.json:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+            return
+        print(f"# 현재 {hhmmss(r['now_ms'])}  (시뮬레이터 시작 {hhmmss(r['started_ms'])})")
+        print("# 실제 이상 상황 (학생 서비스가 경보를 내야 하는 구간)")
+        for w in r["anomalies"]:
+            mark = "▶ 진행 중" if w["start_ms"] <= r["now_ms"] < w["end_ms"] else ("예정" if w["start_ms"] > r["now_ms"] else "")
+            print(f"  {hhmmss(w['start_ms'])} ~ {hhmmss(w['end_ms'])}  {w['device_id']:13s} {w['room']:7s} {w['label']} {mark}")
+        print("# 고장 주입 · 해제 이력")
+        for f in r["faults"]:
+            dur = "" if f.get("duration") is None else f" {f['duration']:.0f}s"
+            print(f"  {hhmmss(f['ts'])}  {f['action']:5s} {f['device_id']:13s} {f['mode']}{dur}")
+    elif a.cmd == "scenario":
+        run_scenario(a.file)
+
+
+if __name__ == "__main__":
+    main()

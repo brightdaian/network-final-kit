@@ -1,0 +1,9 @@
+# 저장소 루트에 .gitignore 로 복사
+.env
+grade-report/
+.grader-override.yaml
+__pycache__/
+*.pyc
+# 브로커 계정 파일 — entrypoint.sh 가 컨테이너 안에서 만들므로 저장소에 둘 필요가 없다
+mosquitto/passwd
+mosquitto/secure/passwd
